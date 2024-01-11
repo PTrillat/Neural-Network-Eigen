@@ -3,150 +3,401 @@
 #include <iostream>
 #include <vector>
 
-template <int m, int n> // dimensions
-void pretty_print(std::ostream &os, const std::string name,
-                  const Eigen::Matrix<float, m, n> &M,
-                  const Eigen::Matrix<float, m, n> &dM) {
-  os << name << std::endl;
-  for (int i = 0; i < m; i++) {
-    os << '\t' << M(i, 0);
-    for (int j = 1; j < n; j++)
-      os << ", " << M(i, j);
-    os << '\t' << dM(i, 0);
-    for (int j = 1; j < n; j++)
-      os << ", " << dM(i, j);
-    os << std::endl;
+template <typename Derived>
+void pretty_print(const std::string &name, const Eigen::DenseBase<Derived> &M) {
+  Eigen::IOFormat format = Eigen::IOFormat(Eigen::StreamPrecision, Eigen::DontAlignCols, ", ", "\n", "\t[", "]", "{", "}");
+  std::cout << name << std::endl;
+  std::cout << M.format(format) << std::endl;
+}
+
+template <typename Derived1, typename Derived2>
+void pretty_print(const std::string &name, const Eigen::DenseBase<Derived1> &M, const Eigen::DenseBase<Derived2> &dM) {
+  Eigen::IOFormat format = Eigen::IOFormat(Eigen::StreamPrecision, Eigen::DontAlignCols, ", ", "\n", "\t[", "]");
+  std::cout << name << std::endl;
+  for (int i = 0; i < M.rows(); ++i) {
+    std::cout << '\t' << M.row(i).format(Eigen::IOFormat(Eigen::StreamPrecision, Eigen::DontAlignCols, ", ", ", "));
+    std::cout << '\t' << dM.row(i).format(Eigen::IOFormat(Eigen::StreamPrecision, Eigen::DontAlignCols, ", ", ", "));
+    std::cout << std::endl;
   }
 }
 
-/* sigmoid activation bloc */
-template <int l, int m, int n>
-void sigmoid(Eigen::Matrix<float, l, n> &Z, Eigen::Matrix<float, l, n> &dZ) {
-  Eigen::Array<float, l, n> sigma = 1.f / (1.f + Eigen::exp(-Z.array()));
-  Z = sigma.matrix();
-  dZ = (sigma * (1.f - sigma)).matrix();
+namespace NeuralNetwork {
+
+  /* Activation Functions */
+  namespace Activation {
+    // Identity Activation
+    template <int l, int m, int n>
+    void identity(const Eigen::Array<float, l, n> &Z, Eigen::Array<float, l, n> &Y, Eigen::Array<float, l, n> &df) {
+      Y = Z;
+      df = Eigen::Array<float, l, n>::Ones();
+    }
+
+    // Sigmoid Activation
+    template <int l, int m, int n>
+    void sigmoid(const Eigen::Array<float, l, n> &Z, Eigen::Array<float, l, n> &Y, Eigen::Array<float, l, n> &df) {
+      Y = 1.f / (1.f + Eigen::exp(-Z));
+      df = Y * (1.f - Y);
+    }
+
+    // Rectified Linear Unit (ReLU) Activation
+    template <int l, int m, int n>
+    void rectified(const Eigen::Array<float, l, n> &Z, Eigen::Array<float, l, n> &Y, Eigen::Array<float, l, n> &df) {
+      const float alpha = 0.1f; // Leaky ReLU factor
+      df = 0.5f * ((1.f - alpha) * Eigen::sign(Z) + (1.f + alpha));
+      Y = df * Z;
+    }
+  } // namespace Activation
+
+  /* Loss Functions */
+  namespace Loss {
+    // Squared L2 Norm Loss
+    template <int l, int n>
+    float squared(const Eigen::Array<float, l, n> &Yref, const Eigen::Array<float, l, n> &Y, Eigen::Array<float, l, n> &dY) {
+      dY = Y - Yref;
+      return 0.5f * dY.matrix().squaredNorm();
+    }
+
+    // Huber Loss
+    template <int l, int n>
+    float huber(const Eigen::Array<float, l, n> &Yref, const Eigen::Array<float, l, n> &Y, Eigen::Array<float, l, n> &dY) {
+      const Eigen::Array<float, l, n> diff = Y - Yref;
+      const Eigen::Array<float, l, n> sqrt = Eigen::sqrt(diff * diff + 1.f);
+      dY = diff / sqrt;
+      return (sqrt + 1.f).sum();
+    }
+  } // namespace Loss
+
+  /* Neural Network Layer */
+  template <int l, int m, int n>
+  struct Layer {
+    // Matrix and Array members
+    Eigen::Matrix<float, m, n> weights, dWeights;
+    Eigen::Matrix<float, 1, n> biases, dBiases;
+    Eigen::Array<float, l, n> output, dOutput, df;
+
+    // Activation Function Pointer
+    void (*activation)(const Eigen::Array<float, l, n> &Z, Eigen::Array<float, l, n> &Y, Eigen::Array<float, l, n> &df);
+
+    void initialise(const std::string &act) {
+      weights = Eigen::Matrix<float, m, n>::Random();
+      dWeights.setZero();
+      biases = Eigen::Matrix<float, 1, n>::Random();
+      dBiases.setZero();
+      output.setZero();
+      dOutput.setZero();
+      df.setZero();
+      // Assign the activation function based on the input string
+      if (act.compare("identity") == 0)
+        activation = Activation::identity<l, m, n>;
+      else if (act.compare("sigmoid") == 0)
+        activation = Activation::sigmoid<l, m, n>;
+      else
+        activation = Activation::rectified<l, m, n>;
+    }
+
+    // Print
+    void print() {
+      std::cout << std::scientific;
+      pretty_print("A", weights, dWeights);
+      pretty_print("B", biases, dBiases);
+      pretty_print("Y", output, df);
+    }
+
+    // Forward Propagation
+    void forward(const Eigen::Array<float, l, m> &input) {
+      const Eigen::Matrix<float, l, n> Z = (input.matrix() * weights).rowwise() + biases;
+      activation(Z.array(), output, df);
+    }
+
+    // Backward Propagation
+    void backward(const Eigen::Array<float, l, m> &input, Eigen::Array<float, l, m> &dInput) {
+      const Eigen::Matrix<float, l, n> dZ = (df * dOutput).matrix();
+      dBiases = dZ.colwise().sum();
+      dWeights = input.matrix().transpose() * dZ;
+      dInput = (dZ * weights.transpose()).array();
+    }
+
+    // Update Weights and Biases
+    void update(const float step) {
+      weights -= step * dWeights;
+      biases -= step * dBiases;
+    }
+  };
+} // namespace NeuralNetwork
+
+/*
+const int l = 5, m = 2, n = 1;
+
+int main() {
+  Eigen::Array<float, l, m> X, dX;
+  Eigen::Array<float, l, n> Y, dY;
+  // clang-format off
+  X(0, 0) = 0.f; X(0, 1) = 0.f; Y(0) = 0.f;
+  X(1, 0) = 0.f; X(1, 1) = 1.f; Y(1) = 1.f;
+  X(2, 0) = 1.f; X(2, 1) = 0.f; Y(2) = 1.f;
+  X(3, 0) = 1.f; X(3, 1) = 1.f; Y(3) = 2.f;
+  X(4, 0) = .5f; X(4, 1) = .5f; Y(4) = 1.f;
+  // clang-format on
+  dX = Eigen::Array<float, l, m>::Ones();
+
+  // Example usage of the neural network layer
+  float learningRate = 0.01f;
+  NeuralNetwork::Layer<l, m, n> layer;
+  layer.initialise("rectified");
+
+  for (int t = 0; t < 1000; t++) {
+    layer.forward(X);
+    std::cout << "error : " << NeuralNetwork::Loss::squared(Y, layer.output, layer.dOutput) << std::endl;
+    layer.backward(X, dX);
+    // layer.print();
+    layer.update(learningRate);
+  }
+
+  return 0;
+}
+*/
+
+const int l = 5, m = 2, n = 1;
+
+int main() {
+  Eigen::Array<float, l, m> X, dX;
+  Eigen::Array<float, l, n> Y, dY;
+  // clang-format off
+  X(0, 0) = 0.f; X(0, 1) = 0.f; Y(0) = 0.f;
+  X(1, 0) = 0.f; X(1, 1) = 1.f; Y(1) = 1.f;
+  X(2, 0) = 1.f; X(2, 1) = 0.f; Y(2) = 1.f;
+  X(3, 0) = 1.f; X(3, 1) = 1.f; Y(3) = 0.f;
+  X(4, 0) = .5f; X(4, 1) = .5f; Y(4) = 1.f;
+  // clang-format on
+  dX = Eigen::Array<float, l, m>::Ones();
+
+  // Example usage of the neural network layer
+  float learningRate = 0.01f;
+  NeuralNetwork::Layer<l, m, 2> layer1;
+  layer1.initialise("rectified");
+  NeuralNetwork::Layer<l, 2, n> layer2;
+  layer2.initialise("rectified");
+
+  for (int t = 0; t < 10000; t++) {
+    layer1.forward(X);
+    layer2.forward(layer1.output);
+    std::cout << "error : " << NeuralNetwork::Loss::squared(Y, layer2.output, layer2.dOutput) << std::endl;
+    layer2.backward(layer1.output, layer1.dOutput);
+    layer1.backward(X, dX);
+
+    /*layer1.print();
+    layer2.print();*/
+
+    layer1.update(learningRate);
+    layer2.update(learningRate);
+  }
+
+  return 0;
 }
 
-/* relu activation bloc */
-template <int l, int m, int n>
-void rectified(Eigen::Matrix<float, l, n> &Z, Eigen::Matrix<float, l, n> &dZ) {
-  const float alpha = .01f; // how leaky it is
-  Eigen::Array<float, l, n> sigma =
-      .5f * ((1.f - alpha) * Eigen::sign(Z.array()) +
-             (1.f + alpha)); // leaky positive
-  dZ = sigma.matrix();
-  Z.array() = sigma * dZ.array();
-}
+/* const int l = 4, m = 2, n = 1;
 
-/* Squared L2 norm loss */
-template <int l, int n>
-float squared(const Eigen::Matrix<float, l, n> &Y,
-              const Eigen::Matrix<float, l, n> &Yref,
-              Eigen::Matrix<float, l, n> &dY,
-              bool silent) {
-    const Eigen::Matrix<float, l, n> diff = Y - Yref;
-    dY.array() *= diff.array();
-    if (silent)
-        return 0.f;
-    return .5f * diff.squaredNorm();
+int main() {
+  Eigen::Matrix<float, l, m> X, dX;
+  Eigen::Array<float, l, n> Y, dY;
+  // clang-format off
+  X(0, 0) = 0.f; X(0, 1) = 0.f; Y(0) = 0.f;
+  X(1, 0) = 0.f; X(1, 1) = 1.f; Y(1) = 1.f;
+  X(2, 0) = 1.f; X(2, 1) = 0.f; Y(2) = 1.f;
+  X(3, 0) = 1.f; X(3, 1) = 1.f; Y(3) = 0.f;
+  // clang-format on
+  dX = Eigen::Matrix<float, l, m>::Ones();
 
-}
+  // Example usage of the neural network layer
+  float learningRate = 0.09f;
+  NeuralNetwork::Layer<l, m, n> layer;
+  layer.initialise("rectified");
 
-/* Huber Loss bloc */
-float huberLoss(float x) { return std::sqrt(x * x + 1.0f) - 1.0f; }
-
-float huberLossDerivative(float x) { return x / std::sqrt(x * x + 1.0f); }
-
-
-template <int l, int m, int n> // dimensions
-struct Layer {
-  // Eigen::Matrix<float, l, m> X, dX;
-  Eigen::Matrix<float, m, n> A, dA;
-  Eigen::Matrix<float, 1, n> B, dB;
-  Eigen::Matrix<float, l, n> Y, dY;
-  // compute activation function and derivative
-  // should modify the inputs arrays inplace
-  void (*activation)(Eigen::Matrix<float, l, n> &Z,
-                     Eigen::Matrix<float, l, n> &dZ);
-
-  void print(std::ostream &os) const {
-    os << std::scientific;
-    pretty_print(os, "A", A, dA);
-    pretty_print(os, "B", B, dB);
-    pretty_print(os, "Y", Y, dY);
+  for (int t = 0; t < 1000; t++) {
+    layer.forward(X);
+    std::cout << "error : " << NeuralNetwork::Loss::squared(Y, layer.output, layer.dOutput) << std::endl;
+    layer.backward(X, dX);
+    layer.print();
+    layer.update(learningRate);
   }
 
-  void initialise(const char *act) {
-    A = Eigen::Matrix<float, m, n>::Random();
-    B = Eigen::Matrix<float, 1, n>::Random();
-    Y.setZero();
-    dA.setZero();
-    dB.setZero();
-    dY.setZero();
-    if (act == "sigmoid")
-      this->activation = sigmoid<l, m, n>;
-    else
-      this->activation = rectified<l, m, n>;
-  }
+  return 0;
+} */
 
-  void propagation(const Eigen::Matrix<float, l, m> &X) {
-    Y = (X * A).rowwise() + B; // for now this is a Z matrix
-    activation(Y, dY);         // element wise operations
-  }
+/*
 
-  void retropagation(const Eigen::Matrix<float, l, m> &X,
-                     Eigen::Matrix<float, l, m> &dX) {
-    // Supposes that dY constains activation derivative
-    // and computes full derivative based on this assumption
-    dB = dY.colwise().sum();
-    dA = X.transpose() * dY;
-    dX.array() *= (dY * A.transpose()).array(); // element wise multiplication
-  }
+Eigen::Matrix<float, 3, 2> input = Eigen::Matrix<float, 3, 2>::Random();
+  Eigen::Matrix<float, 3, 2> dInput;
+  Eigen::Matrix<float, 3, 2> outputGradient = Eigen::Matrix<float, 3, 2>::Random();
 
-  void update(const float step) {
-    A -= step * dA;
-    B -= step * dB;
-  }
-};
+*/
 
+/*
 const int l = 4, m = 2, n = 1;
 
 int main() {
   Eigen::Matrix<float, l, m> X, dX;
-  Eigen::Matrix<float, l, n> Y, dY;
+  Eigen::Array<float, l, n> Y, dY;
+  // clang-format off
   X(0, 0) = 0.f; X(0, 1) = 0.f; Y(0) = 1.f;
   X(1, 0) = 0.f; X(1, 1) = 1.f; Y(1) = 1.f;
   X(2, 0) = 1.f; X(2, 1) = 0.f; Y(2) = 1.f;
-  X(3, 0) = 1.f; X(3, 1) = 1.f; Y(3) = 0.f;
+  X(3, 0) = 1.f; X(3, 1) = 1.f; Y(3) = 1.f;
+  // clang-format on
+  dX = Eigen::Matrix<float, l, m>::Ones();
 
-  pretty_print(std::cout, "X", X, dX);
-  pretty_print(std::cout, "Y", Y, dY);
+  pretty_print("X", X, dX);
+  pretty_print("Y", Y, dY);
 
+  Layer<l, m, n> layer;
+  layer.initialise("identity");
+  layer.print();
+
+  for (int t = 0; t < 1000; t++) {
+    layer.propagation(X);
+    std::cout << "error : " << squared(Y, layer.Y, layer.dY) << std::endl;
+    layer.retropagation(X, dX);
+    layer.update(.01f);
+    layer.print();
+  }
+}
+*/
+
+/* const int l = 5, m = 1, n = 1;
+
+int main() {
+  Eigen::Matrix<float, l, m> X, dX = Eigen::Matrix<float, l, m>::Ones();
+  Eigen::Array<float, l, n> Y, dY;
+  X(0, 0) = 0.f; Y(0, 0) = 1.f;
+  X(1, 0) = 1.f; Y(1, 0) = 0.f;
+  X(2, 0) = 2.f; Y(2, 0) = -1.f;
+  X(3, 0) = 3.f; Y(3, 0) = -2.f;
+  X(4, 0) = 4.f; Y(4, 0) = -3.f;
+
+  pretty_print("X", X, dX);
+  pretty_print("Y", Y, dY);
+
+  Layer<l, m, n> layer;
+  layer.initialise("identity");
+  // layer.A(0, 0) = 1.f;
+  // layer.B(0) = 1.f;
+  layer.print();
+
+  for (int t = 0; t < 100; t++) {
+    layer.propagation(X);
+    std::cout << "error : " << squared(Y, layer.Y, layer.dY) << std::endl;
+    layer.retropagation(X, dX);
+    layer.update(.05f);
+    layer.print();
+  }
+} */
+
+/* const int l = 1, m = 1, n = 1;
+
+int main() {
+  Eigen::Matrix<float, l, m> X, dX;
+  Eigen::Matrix<float, l, n> Y, dY;
+  X(0, 0) = 0.f; Y(0) = 0.f; dX(0, 0) = 1.f;
+
+  pretty_print( "X", X, dX);
+  pretty_print( "Y", Y, dY);
+
+  Layer<l, m, n> layer;
+  layer.initialise("sigmoid");
+  layer.A(0, 0) = 1.f;
+  layer.B(0) = 1.f;
+  layer.print();
+
+  for (int t = 0; t < 1; t++) {
+    layer.propagation(X);
+    std::cout << "error : " << squared(layer.Y, Y, layer.dY, true) << std::endl;
+    layer.retropagation(X, dX);
+    // layer.update(.01f);
+    layer.print();
+  }
+}
+*/
+
+/* const int l = 4, m = 2, n = 1;
+
+int main() {
+  Eigen::Matrix<float, l, m> X, dX;
+  Eigen::Matrix<float, l, n> Y, dY;
+  // clang-format off
+  X(0, 0) = 0.f; X(0, 1) = 0.f; Y(0) = 1.f;
+  X(1, 0) = 0.f; X(1, 1) = 1.f; Y(1) = 1.f;
+  X(2, 0) = 1.f; X(2, 1) = 0.f; Y(2) = 1.f;
+  X(3, 0) = 1.f; X(3, 1) = 1.f; Y(3) = 1.f;
+  // clang-format on
+  dX = Eigen::Matrix<float, l, m>::Ones();
+
+  pretty_print( "X", X, dX);
+  pretty_print( "Y", Y, dY);
 
   Layer<l, m, 2> layer1;
-  Layer<l, 2, n> layer2;
-  
-  layer1.initialise("sigmoid");
-  layer2.initialise("sigmoid");
-  
-  layer1.print(std::cout);
-  layer2.print(std::cout);
+  layer1.initialise("identity");
+  layer1.print();
 
-  for (int epoch = 0; epoch < 10; epoch++) {
-    for (int batch = 0; batch < 1000; batch++) {
-        layer1.propagation(X);
-        layer2.propagation(layer1.Y);
-        
-        squared(layer2.Y, Y, layer2.dY, true);
-        
-        layer2.retropagation(layer1.Y, layer1.dY);
-        layer1.retropagation(X, dX);
-        
-        layer1.update(.01f);
-        layer2.update(.01f);
-      }
-    std::cout << "error : " << squared(layer2.Y, Y, layer2.dY, false) << std::endl;
+  Layer<l, 2, n> layer2;
+  layer2.initialise("identity");
+  layer2.print();
+
+  for (int t = 0; t < 1; t++) {
+    layer1.propagation(X);
+    layer2.propagation(layer1.Y);
+
+    std::cout << "error : " << squared(Y, layer2.Y, layer2.dY) << std::endl;
+
+    layer2.retropagation(layer1.Y, layer1.dY);
+    layer1.retropagation(X, dX);
+
+    // layer1.update(.01f);
+    // layer2.update(.01f);
+
+    layer1.print();
+    layer2.print();
   }
-  layer1.print(std::cout);
-  layer2.print(std::cout);
+} */
+
+/* const int l = 1, m = 1, n = 1;
+
+int main() {
+  Eigen::Matrix<float, l, m> X, dX;
+  Eigen::Matrix<float, l, n> Y, dY;
+  // clang-format off
+  X(0, 0) = 1.f; Y(0) = 0.f;
+  // clang-format on
+  dX = Eigen::Matrix<float, l, m>::Ones();
+
+  pretty_print( "X", X, dX);
+  pretty_print( "Y", Y, dY);
+
+  Layer<l, m, 1> layer1;
+  layer1.initialise("sigmoid");
+  layer1.A = Eigen::Matrix<float, m, 1>::Ones();
+  layer1.B = Eigen::Matrix<float, 1, 1>::Zero();
+  layer1.print();
+
+  Layer<l, 1, n> layer2;
+  layer2.initialise("identity");
+  layer2.A = Eigen::Matrix<float, 1, n>::Ones();
+  layer2.B = Eigen::Matrix<float, 1, n>::Zero();
+  layer2.print();
+
+  for (int t = 0; t < 10; t++) {
+    layer1.propagation(X);
+    layer2.propagation(layer1.Y);
+
+    std::cout << "error : " << squared(layer2.Y, Y, layer2.dY, true) << std::endl;
+
+    layer2.retropagation(layer1.Y, layer1.dY);
+    layer1.retropagation(X, dX);
+
+    layer1.update(.1f);
+    layer2.update(.1f);
+
+    layer1.print();
+    layer2.print();
+  }
 }
+*/
