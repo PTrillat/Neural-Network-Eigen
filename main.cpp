@@ -1,4 +1,5 @@
 #include <Eigen/Dense>
+#include <chrono>
 #include <fstream>
 #include <iostream>
 #include <vector>
@@ -73,7 +74,10 @@ namespace NeuralNetwork {
     // Matrix and Array members
     Eigen::Matrix<float, m, n> weights, dWeights;
     Eigen::Matrix<float, 1, n> biases, dBiases;
-    Eigen::Array<float, l, n> output, dOutput, df;
+    Eigen::Array<float, l, n> output, dOutput;
+
+    // Layer's gradient squared norm for normalisation
+    float square;
 
     // Activation Function Pointer
     void (*activation)(const Eigen::Array<float, l, n> &Z, Eigen::Array<float, l, n> &Y, Eigen::Array<float, l, n> &df);
@@ -85,7 +89,7 @@ namespace NeuralNetwork {
       dBiases.setZero();
       output.setZero();
       dOutput.setZero();
-      df.setZero();
+      square = 0.f;
       // Assign the activation function based on the input string
       if (act.compare("identity") == 0)
         activation = Activation::identity<l, m, n>;
@@ -100,26 +104,28 @@ namespace NeuralNetwork {
       std::cout << std::scientific;
       pretty_print("A", weights, dWeights);
       pretty_print("B", biases, dBiases);
-      pretty_print("Y", output, df);
+      pretty_print("Y", output, dOutput);
     }
 
     // Forward Propagation
     void forward(const Eigen::Array<float, l, m> &input) {
       const Eigen::Matrix<float, l, n> Z = (input.matrix() * weights).rowwise() + biases;
-      activation(Z.array(), output, df);
+      activation(Z.array(), output, dOutput);
     }
 
     // Backward Propagation
-    void backward(const Eigen::Array<float, l, m> &input, Eigen::Array<float, l, m> &dInput) {
-      const Eigen::Matrix<float, l, n> dZ = (df * dOutput).matrix();
+    void backward(const Eigen::Array<float, l, m> &input, Eigen::Array<float, l, m> &dInput, const float innovation) {
+      const Eigen::Matrix<float, l, n> dZ = dOutput.matrix(); // already constains df * dY
       dBiases = dZ.colwise().sum();
-      dWeights = input.matrix().transpose() * dZ;
-      dInput = (dZ * weights.transpose()).array();
+      const Eigen::Matrix<float, m, n> grad = input.matrix().transpose() * dZ;
+      dWeights += innovation * (grad - dWeights);
+      square += innovation * (grad.squaredNorm() / (m * n) - square);
+      dInput *= (dZ * weights.transpose()).array(); // inplace multiply f'(Z) of previous layer by dY
     }
 
     // Update Weights and Biases
     void update(const float step) {
-      weights -= step * dWeights;
+      weights -= step * dWeights / std::sqrt(square + 1e-5f);
       biases -= step * dBiases;
     }
   };
@@ -172,18 +178,20 @@ int main() {
   dX = Eigen::Array<float, l, m>::Ones();
 
   // Example usage of the neural network layer
-  float learningRate = 0.01f;
+  const float learningRate = 0.025f;
+  const float innovationRate = 0.025f;
   NeuralNetwork::Layer<l, m, 2> layer1;
   layer1.initialise("rectified");
   NeuralNetwork::Layer<l, 2, n> layer2;
   layer2.initialise("rectified");
 
-  for (int t = 0; t < 10000; t++) {
+  auto start = std::chrono::high_resolution_clock::now();
+  for (int t = 1; t <= 300; t++) {
     layer1.forward(X);
     layer2.forward(layer1.output);
     std::cout << "error : " << NeuralNetwork::Loss::squared(Y, layer2.output, layer2.dOutput) << std::endl;
-    layer2.backward(layer1.output, layer1.dOutput);
-    layer1.backward(X, dX);
+    layer2.backward(layer1.output, layer1.dOutput, innovationRate);
+    layer1.backward(X, dX, innovationRate);
 
     /*layer1.print();
     layer2.print();*/
@@ -191,6 +199,9 @@ int main() {
     layer1.update(learningRate);
     layer2.update(learningRate);
   }
+  auto stop = std::chrono::high_resolution_clock::now();
+  auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
+  std::cout << duration.count() << std::endl;
 
   return 0;
 }
